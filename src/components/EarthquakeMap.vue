@@ -359,7 +359,9 @@ function initMap() {
     const setBounds = () => {
       if (map) {
         const b = map.getBounds()
-        mapBounds.value = { west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() }
+        if (b) {
+          mapBounds.value = { west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() }
+        }
       }
     }
     map?.on('moveend', setBounds)
