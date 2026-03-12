@@ -68,9 +68,9 @@ export function buildCirclePolygon(
   edge: [number, number],
   steps = 64
 ): [number, number][] {
-  const rKm = haversineKm(center, edge)
-  const rMeters = rKm * 1000
   const [cx, cy] = lngLatToMercatorMeters(center[0], center[1])
+  const [ex, ey] = lngLatToMercatorMeters(edge[0], edge[1])
+  const rMeters = Math.hypot(ex - cx, ey - cy)
   const pts: [number, number][] = []
   for (let i = 0; i <= steps; i++) {
     const t = (i / steps) * Math.PI * 2
