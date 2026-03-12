@@ -21,7 +21,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      GITHUB_PAGES: true
+      GITHUB_PAGES: 'true'
+      BASE_PATH: /${{ github.event.repository.name }}/
       VITE_MAPBOX_TOKEN: ${{ secrets.VITE_MAPBOX_TOKEN }}
     steps:
       - name: Checkout
@@ -38,8 +39,6 @@ jobs:
 
       - name: Build
         run: npm run build
-        env:
-          GITHUB_PAGES: true
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v4
