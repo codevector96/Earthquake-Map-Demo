@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import mapboxgl, { type Map as MapboxMap } from 'mapbox-gl'
-import { computed, nextTick, onMounted, onUnmounted, ref, watch, watchEffect } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, toRaw, watch, watchEffect } from 'vue'
 import { MapboxOverlay } from '@deck.gl/mapbox'
 import { PathLayer, PolygonLayer, ScatterplotLayer } from '@deck.gl/layers'
 import type { EarthquakePoint, FieldKey, SavedFilter } from '../types/earthquake'
@@ -41,6 +41,9 @@ const isShapeOpen = ref(false)
 
 let map: MapboxMap | null = null
 const overlay = ref<MapboxOverlay | null>(null)
+
+type MapBounds = { west: number; south: number; east: number; north: number }
+const mapBounds = ref<MapBounds | null>(null)
 
 const { points, status, statusMessage, loadCsv } = useEarthquakeData()
 const {
@@ -199,6 +202,19 @@ const filteredPoints = computed(() => {
   return data.filter((d) => applyAttributeFilters(d) && applyDistanceFilter(d) && applyShapeFilter(d))
 })
 
+const visiblePointsCount = computed(() => {
+  const fp = filteredPoints.value
+  const b = mapBounds.value
+  if (!b) return fp.length
+  return fp.filter(
+    (p) =>
+      p.longitude >= b.west &&
+      p.longitude <= b.east &&
+      p.latitude >= b.south &&
+      p.latitude <= b.north
+  ).length
+})
+
 function handleStartPickOrigin() {
   startPickOrigin()
   isFilterOpen.value = false
@@ -310,17 +326,17 @@ function initMap() {
   // Attach the deck.gl overlay after the map style is loaded.
   // On Mapbox GL JS, attaching too early can lead to layers not rendering.
   map.once('load', () => {
-    // Deepen the overall "blue" tone a bit.
-    // Layer ids differ across styles, so we do this best-effort.
-    try {
-      map?.setPaintProperty('background', 'background-color', '#070b18')
-    } catch {}
-    try {
-      map?.setPaintProperty('water', 'fill-color', '#071a34')
-    } catch {}
-    try {
-      map?.setPaintProperty('waterway', 'line-color', '#0b2c55')
-    } catch {}
+    // Deepen the overall "blue" tone. Layer IDs vary by Mapbox style; only set if present.
+    const style = map?.getStyle()
+    if (style?.layers) {
+      const layerIds = new Set(style.layers.map((l) => l.id))
+      if (layerIds.has('background'))
+        try { map?.setPaintProperty('background', 'background-color', '#070b18') } catch {}
+      if (layerIds.has('water'))
+        try { map?.setPaintProperty('water', 'fill-color', '#071a34') } catch {}
+      if (layerIds.has('waterway'))
+        try { map?.setPaintProperty('waterway', 'line-color', '#0b2c55') } catch {}
+    }
 
     overlay.value = new MapboxOverlay({
       // interleaved=false tends to be the most robust default across GPUs/browsers.
@@ -339,6 +355,16 @@ function initMap() {
         }
       },
     })
+
+    const setBounds = () => {
+      if (map) {
+        const b = map.getBounds()
+        mapBounds.value = { west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() }
+      }
+    }
+    map?.on('moveend', setBounds)
+    map?.on('zoomend', setBounds)
+    setBounds()
 
     map?.addControl(overlay.value as any)
     nextTick(applyMapCursor)
@@ -370,7 +396,10 @@ watchEffect(() => {
 
   if (!overlay.value) return
 
-  const data = filteredPoints.value
+  // Pass plain arrays/objects to deck.gl (no Vue reactive proxies)
+  const rawPoints = toRaw(filteredPoints.value)
+  const data = Array.isArray(rawPoints) ? rawPoints.map((d) => ({ ...d })) : []
+
   const origin = distanceOrigin.value
   const originData = origin ? [{ longitude: origin.longitude, latitude: origin.latitude }] : []
 
@@ -380,13 +409,15 @@ watchEffect(() => {
   let shapePolygon: [number, number][] | null = null
   // Completed shape
   if (shapeType.value === 'rectangle' && shapePts.length >= 4) {
-    shapePolygon = [...shapePts, shapePts[0]!]
+    shapePolygon = shapePts.map((p) => [p[0], p[1]])
+    shapePolygon.push(shapePolygon[0]!)
   } else if (shapeType.value === 'rectangle' && shapePts.length >= 2) {
     shapePolygon = buildRectanglePolygon(shapePts[0]!, shapePts[1]!)
   } else if (shapeType.value === 'circle' && shapePts.length >= 2) {
     shapePolygon = buildCirclePolygon(shapePts[0]!, shapePts[1]!)
   } else if (shapeType.value === 'polygon' && shapePts.length >= 3) {
-    shapePolygon = [...shapePts, shapePts[0]!]
+    shapePolygon = shapePts.map((p) => [p[0], p[1]])
+    shapePolygon.push(shapePolygon[0]!)
   }
   // Rect/circle drag preview
   if (!shapePolygon && dStart && dCurrent && (shapeType.value === 'rectangle' || shapeType.value === 'circle')) {
@@ -397,9 +428,10 @@ watchEffect(() => {
     }
   }
 
+  const shapeDataPlain = shapePolygon ? [{ polygon: shapePolygon.map((p) => [p[0], p[1]]) }] : []
   const polygonLayer = new PolygonLayer<{ polygon: [number, number][] }>({
     id: 'shape',
-    data: shapePolygon ? [{ polygon: shapePolygon }] : [],
+    data: shapeDataPlain,
     pickable: false,
     filled: true,
     stroked: true,
@@ -413,11 +445,11 @@ watchEffect(() => {
 
   // Polygon drawing: show outline while adding points
   if (shapeType.value === 'polygon' && drawingShape.value && shapePts.length >= 2) {
-    const pathData = shapePts
+    const pathDataPlain = shapePts.map((p) => [p[0], p[1]])
     layers.push(
       new PathLayer<{ path: [number, number][] }>({
         id: 'shape-outline',
-        data: [{ path: pathData }],
+        data: [{ path: pathDataPlain }],
         getPath: (d) => d.path,
         getColor: [120, 170, 255, 200],
         widthUnits: 'pixels',
@@ -474,7 +506,8 @@ watch(
     if (!overlay.value) return
     const colorField = colorByField.value
     const colorPaletteId = colorPalette.value
-    const data = filteredPoints.value
+    const rawPoints = toRaw(filteredPoints.value)
+    const data = Array.isArray(rawPoints) ? rawPoints.map((d) => ({ ...d })) : []
     const origin = distanceOrigin.value
     const originData = origin ? [{ longitude: origin.longitude, latitude: origin.latitude }] : []
     const shapePts = shapePoints.value
@@ -482,13 +515,15 @@ watch(
     const dCurrent = dragCurrent.value
     let shapePolygon: [number, number][] | null = null
     if (shapeType.value === 'rectangle' && shapePts.length >= 4) {
-      shapePolygon = [...shapePts, shapePts[0]!]
+      shapePolygon = shapePts.map((p) => [p[0], p[1]])
+      shapePolygon.push(shapePolygon[0]!)
     } else if (shapeType.value === 'rectangle' && shapePts.length >= 2) {
       shapePolygon = buildRectanglePolygon(shapePts[0]!, shapePts[1]!)
     } else if (shapeType.value === 'circle' && shapePts.length >= 2) {
       shapePolygon = buildCirclePolygon(shapePts[0]!, shapePts[1]!)
     } else if (shapeType.value === 'polygon' && shapePts.length >= 3) {
-      shapePolygon = [...shapePts, shapePts[0]!]
+      shapePolygon = shapePts.map((p) => [p[0], p[1]])
+      shapePolygon.push(shapePolygon[0]!)
     }
     if (!shapePolygon && dStart && dCurrent && (shapeType.value === 'rectangle' || shapeType.value === 'circle')) {
       shapePolygon =
@@ -496,9 +531,10 @@ watch(
           ? buildRectanglePolygon(dStart, dCurrent)
           : buildCirclePolygon(dStart, dCurrent)
     }
+    const shapeDataPlain = shapePolygon ? [{ polygon: shapePolygon.map((p) => [p[0], p[1]]) }] : []
     const polygonLayer = new PolygonLayer<{ polygon: [number, number][] }>({
       id: 'shape',
-      data: shapePolygon ? [{ polygon: shapePolygon }] : [],
+      data: shapeDataPlain,
       pickable: false,
       filled: true,
       stroked: true,
@@ -509,10 +545,11 @@ watch(
     })
     const layers: any[] = [polygonLayer]
     if (shapeType.value === 'polygon' && drawingShape.value && shapePts.length >= 2) {
+      const pathDataPlain = shapePts.map((p) => [p[0], p[1]])
       layers.push(
         new PathLayer<{ path: [number, number][] }>({
           id: 'shape-outline',
-          data: [{ path: shapePts }],
+          data: [{ path: pathDataPlain }],
           getPath: (d) => d.path,
           getColor: [120, 170, 255, 200],
           widthUnits: 'pixels',
@@ -596,7 +633,8 @@ onUnmounted(() => {
             :data-status="status"
           >
             <span class="status-dot w-2 h-2 rounded-full bg-[#666]" />
-            <span>{{ statusMessage }}</span>
+            <span v-if="status === 'ready'">{{ visiblePointsCount.toLocaleString() }} points</span>
+            <span v-else>{{ statusMessage }}</span>
           </div>
         </div>
       </div>
@@ -722,36 +760,48 @@ onUnmounted(() => {
             </button>
             <Transition name="spatial-panel">
               <div
-                v-if="isShapeOpen && !drawingShape && !shapeFilterActive"
+                v-if="isShapeOpen && !drawingShape"
                 class="absolute top-full right-0 mt-2 w-72 rounded-[12px] border border-black/8 bg-white shadow-[0_6px_20px_rgba(0,0,0,0.1)] overflow-hidden z-10 p-2"
               >
-                <div class="text-[11px] font-semibold uppercase tracking-wide text-[#666] px-2 py-1.5 mb-1">
-                  Select shape type
-                </div>
-                <button
-                  type="button"
-                  class="w-full flex flex-col items-start gap-0.5 py-2.5 px-3 rounded-[8px] border-2 border-transparent text-[#333] cursor-pointer text-left transition-all hover:bg-[#f5f5f5] hover:border-black/10 focus:border-[#ff7043] focus:shadow-[0_0_0_1px_#ff7043]"
-                  @click="chooseShapeType('rectangle')"
-                >
-                  <span class="text-sm font-medium">Rectangle</span>
-                  <span class="text-xs text-[#666]">Drag on map</span>
-                </button>
-                <button
-                  type="button"
-                  class="w-full flex flex-col items-start gap-0.5 py-2.5 px-3 rounded-[8px] border-2 border-transparent text-[#333] cursor-pointer text-left transition-all hover:bg-[#f5f5f5] hover:border-black/10 focus:border-[#ff7043] focus:shadow-[0_0_0_1px_#ff7043]"
-                  @click="chooseShapeType('circle')"
-                >
-                  <span class="text-sm font-medium">Circle</span>
-                  <span class="text-xs text-[#666]">Drag from center to edge</span>
-                </button>
-                <button
-                  type="button"
-                  class="w-full flex flex-col items-start gap-0.5 py-2.5 px-3 rounded-[8px] border-2 border-transparent text-[#333] cursor-pointer text-left transition-all hover:bg-[#f5f5f5] hover:border-black/10 focus:border-[#ff7043] focus:shadow-[0_0_0_1px_#ff7043]"
-                  @click="chooseShapeType('polygon')"
-                >
-                  <span class="text-sm font-medium">Polygon</span>
-                  <span class="text-xs text-[#666]">Click to add points</span>
-                </button>
+                <template v-if="shapeFilterActive">
+                  <div class="text-[11px] text-[#666] px-2 py-1.5 mb-1">Drag shape on map to move.</div>
+                  <button
+                    type="button"
+                    class="w-full py-2.5 px-3 rounded-[8px] border-0 bg-transparent text-[#333] cursor-pointer text-sm font-medium hover:bg-[#f5f5f5] text-left"
+                    @click="clearShape"
+                  >
+                    Clear shape
+                  </button>
+                </template>
+                <template v-else>
+                  <div class="text-[11px] font-semibold uppercase tracking-wide text-[#666] px-2 py-1.5 mb-1">
+                    Select shape type
+                  </div>
+                  <button
+                    type="button"
+                    class="w-full flex flex-col items-start gap-0.5 py-2.5 px-3 rounded-[8px] border-2 border-transparent text-[#333] cursor-pointer text-left transition-all hover:bg-[#f5f5f5] hover:border-black/10 focus:border-[#ff7043] focus:shadow-[0_0_0_1px_#ff7043]"
+                    @click="chooseShapeType('rectangle')"
+                  >
+                    <span class="text-sm font-medium">Rectangle</span>
+                    <span class="text-xs text-[#666]">Drag on map</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="w-full flex flex-col items-start gap-0.5 py-2.5 px-3 rounded-[8px] border-2 border-transparent text-[#333] cursor-pointer text-left transition-all hover:bg-[#f5f5f5] hover:border-black/10 focus:border-[#ff7043] focus:shadow-[0_0_0_1px_#ff7043]"
+                    @click="chooseShapeType('circle')"
+                  >
+                    <span class="text-sm font-medium">Circle</span>
+                    <span class="text-xs text-[#666]">Drag from center to edge</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="w-full flex flex-col items-start gap-0.5 py-2.5 px-3 rounded-[8px] border-2 border-transparent text-[#333] cursor-pointer text-left transition-all hover:bg-[#f5f5f5] hover:border-black/10 focus:border-[#ff7043] focus:shadow-[0_0_0_1px_#ff7043]"
+                    @click="chooseShapeType('polygon')"
+                  >
+                    <span class="text-sm font-medium">Polygon</span>
+                    <span class="text-xs text-[#666]">Click to add points</span>
+                  </button>
+                </template>
               </div>
             </Transition>
             <div
@@ -778,19 +828,6 @@ onUnmounted(() => {
                 @click="cancelDrawing"
               >
                 Cancel
-              </button>
-            </div>
-            <div
-              v-else-if="shapeFilterActive"
-              class="absolute top-full right-0 mt-2 py-3 px-3.5 rounded-[10px] border border-black/8 bg-white flex flex-wrap items-center gap-2.5 max-w-[280px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] z-10"
-            >
-              <span class="text-xs text-[#666] flex-1 min-w-[120px]">Drag shape to move.</span>
-              <button
-                type="button"
-                class="py-1.5 px-3 rounded-[10px] border-0 bg-transparent text-[#333] cursor-pointer text-xs font-medium hover:bg-[#f5f5f5]"
-                @click="clearShape"
-              >
-                Clear
               </button>
             </div>
           </div>
@@ -837,8 +874,8 @@ onUnmounted(() => {
                         v-for="(label, id) in COLOR_PALETTE_LABELS"
                         :key="id"
                         type="button"
-                        class="flex items-center gap-3 py-2.5 px-3 rounded-[6px] border-2 border-transparent bg-white text-[#333] cursor-pointer text-left transition-all shadow-[0_2px_8px_rgba(0,0,0,0.08)] hover:bg-[#f5f5f5]"
-                        :class="colorPalette === id ? 'border-[#ff7043] bg-[rgba(255,112,67,0.12)]' : ''"
+                        class="flex items-center gap-3 py-2.5 px-3 rounded-[6px] border-2 text-[#333] cursor-pointer text-left transition-all shadow-[0_2px_8px_rgba(0,0,0,0.08)]"
+                        :class="colorPalette === id ? 'border-[#ff7043] bg-[rgba(255,112,67,0.12)] ring-2 ring-[#ff7043]/30' : 'border-transparent bg-white hover:bg-[#f5f5f5]'"
                         :title="label"
                         @click="selectColorPalette(id)"
                       >
@@ -979,8 +1016,10 @@ onUnmounted(() => {
       </div>
 
       <div class="flex justify-between gap-3 text-xs text-[#666] py-3 px-4">
-        <div>Showing</div>
-        <div class="font-mono">{{ filteredPoints.length.toLocaleString() }} / {{ points.length.toLocaleString() }}</div>
+        <div>Visible points</div>
+        <div class="font-mono">
+          {{ visiblePointsCount.toLocaleString() }}<template v-if="visiblePointsCount !== filteredPoints.length"> of {{ filteredPoints.length.toLocaleString() }} filtered</template><template v-if="filteredPoints.length !== points.length"> ({{ points.length.toLocaleString() }} total)</template>
+        </div>
       </div>
 
       <div v-if="activeFilters.length" class="grid gap-2.5 mx-3 mb-3.5">
