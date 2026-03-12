@@ -11,7 +11,6 @@ import {
 
 export function useShapeFilter() {
   const shapeType = ref<ShapeType>('rectangle')
-  const shapeTypeModalOpen = ref(false)
   const drawingShape = ref(false)
   const shapePoints = ref<[number, number][]>([])
   const dragStart = ref<[number, number] | null>(null)
@@ -43,17 +42,8 @@ export function useShapeFilter() {
     return poly ? pointInPolygon(lngLat, poly) : false
   }
 
-  function openShapeModal() {
-    shapeTypeModalOpen.value = true
-  }
-
-  function closeShapeModal() {
-    shapeTypeModalOpen.value = false
-  }
-
   function selectShapeType(type: ShapeType) {
     shapeType.value = type
-    shapeTypeModalOpen.value = false
     drawingShape.value = true
     shapePoints.value = []
     dragStart.value = null
@@ -194,19 +184,12 @@ export function useShapeFilter() {
 
   return {
     shapeType,
-    shapeTypeModalOpen,
     drawingShape,
     shapePoints,
     dragStart,
     dragCurrent,
     movingShape,
-    moveStartLngLat,
-    moveStartPoints,
     shapeFilterActive,
-    getShapePolygonForHitTest,
-    isPointInShape,
-    openShapeModal,
-    closeShapeModal,
     selectShapeType,
     finishPolygon,
     cancelDrawing,

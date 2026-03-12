@@ -1,6 +1,6 @@
 import { computed, ref, onUnmounted } from 'vue'
 import type { LngLat } from '../types/earthquake'
-import { geocodeSearch } from '../utils/geocode'
+import { geocodeSearch, reverseGeocode } from '../utils/geocode'
 import { formatFieldValue } from '../utils/earthquakeData'
 import type { FieldKey } from './useAttributeFilters'
 
@@ -120,8 +120,24 @@ export function useDistanceFilter() {
     pickingOrigin.value = true
   }
 
+  async function setOriginFromMapClick(longitude: number, latitude: number) {
+    distanceOrigin.value = { longitude, latitude }
+    pickingOrigin.value = false
+    geocodeError.value = ''
+    geocodeStatus.value = 'loading'
+    try {
+      const placeName = await reverseGeocode(longitude, latitude)
+      addressQuery.value = placeName ?? ''
+      geocodeStatus.value = placeName ? 'success' : 'idle'
+    } catch {
+      addressQuery.value = ''
+      geocodeStatus.value = 'idle'
+    }
+  }
+
   function clearOrigin() {
     distanceOrigin.value = null
+    addressQuery.value = ''
     pickingOrigin.value = false
     geocodeStatus.value = 'idle'
     geocodeError.value = ''
@@ -152,6 +168,7 @@ export function useDistanceFilter() {
     addressSuggestionIndex,
     addressFieldRef,
     startPickOrigin,
+    setOriginFromMapClick,
     clearOrigin,
     setOriginFromAddress,
     onAddressQueryInput,
