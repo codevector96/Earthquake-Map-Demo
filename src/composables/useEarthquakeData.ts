@@ -11,7 +11,8 @@ export function useEarthquakeData() {
   async function loadCsv() {
     status.value = 'loading'
     statusMessage.value = 'Loading CSV…'
-    const res = await fetch('/data/database.csv')
+    const base = import.meta.env.BASE_URL
+    const res = await fetch(`${base}data/database.csv`)
     if (!res.ok) throw new Error(`Failed to load CSV: ${res.status} ${res.statusText}`)
     const csvText = await res.text()
     const parsed = Papa.parse<CsvRow>(csvText, { header: true, skipEmptyLines: true })
