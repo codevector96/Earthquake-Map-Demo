@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import mapboxgl, { type Map as MapboxMap } from 'mapbox-gl'
-import { computed, nextTick, onMounted, onUnmounted, ref, toRaw, watch, watchEffect } from 'vue'
+import { computed, markRaw, nextTick, onMounted, onUnmounted, ref, shallowRef, toRaw, watch, watchEffect } from 'vue'
 import { MapboxOverlay } from '@deck.gl/mapbox'
 import { PathLayer, PolygonLayer, ScatterplotLayer } from '@deck.gl/layers'
 import type { EarthquakePoint, FieldKey, SavedFilter } from '../types/earthquake'
@@ -40,7 +40,8 @@ const isColorOpen = ref(false)
 const isShapeOpen = ref(false)
 
 let map: MapboxMap | null = null
-const overlay = ref<MapboxOverlay | null>(null)
+// shallowRef so Vue does not deep-react to the overlay (avoids proxy issues when deck.gl stores layers)
+const overlay = shallowRef<MapboxOverlay | null>(null)
 
 type MapBounds = { west: number; south: number; east: number; north: number }
 const mapBounds = ref<MapBounds | null>(null)
@@ -214,6 +215,12 @@ const visiblePointsCount = computed(() => {
       p.latitude <= b.north
   ).length
 })
+
+/** Returns a plain array of point objects for deck.gl (no Vue proxies). */
+function plainCopyPoints(points: EarthquakePoint[]): EarthquakePoint[] {
+  if (!Array.isArray(points) || points.length === 0) return []
+  return JSON.parse(JSON.stringify(points))
+}
 
 function handleStartPickOrigin() {
   startPickOrigin()
@@ -398,27 +405,28 @@ watchEffect(() => {
 
   if (!overlay.value) return
 
-  // Pass plain arrays/objects to deck.gl (no Vue reactive proxies)
-  const rawPoints = toRaw(filteredPoints.value)
-  const data = Array.isArray(rawPoints) ? rawPoints.map((d) => ({ ...d })) : []
+  // Pass only plain arrays/objects to deck.gl (no Vue reactive proxies)
+  const data = plainCopyPoints(filteredPoints.value)
 
   const origin = distanceOrigin.value
-  const originData = origin ? [{ longitude: origin.longitude, latitude: origin.latitude }] : []
+  const originData = origin
+    ? (JSON.parse(JSON.stringify([{ longitude: Number(origin.longitude), latitude: Number(origin.latitude) }])) as { longitude: number; latitude: number }[])
+    : []
 
-  const shapePts = shapePoints.value
+  const shapePts = toRaw(shapePoints.value) ?? shapePoints.value
   const dStart = dragStart.value
   const dCurrent = dragCurrent.value
   let shapePolygon: [number, number][] | null = null
   // Completed shape
   if (shapeType.value === 'rectangle' && shapePts.length >= 4) {
-    shapePolygon = shapePts.map((p) => [p[0], p[1]])
+    shapePolygon = shapePts.map((p) => [Number(p[0]), Number(p[1])])
     shapePolygon.push(shapePolygon[0]!)
   } else if (shapeType.value === 'rectangle' && shapePts.length >= 2) {
     shapePolygon = buildRectanglePolygon(shapePts[0]!, shapePts[1]!)
   } else if (shapeType.value === 'circle' && shapePts.length >= 2) {
     shapePolygon = buildCirclePolygon(shapePts[0]!, shapePts[1]!)
   } else if (shapeType.value === 'polygon' && shapePts.length >= 3) {
-    shapePolygon = shapePts.map((p) => [p[0], p[1]])
+    shapePolygon = shapePts.map((p) => [Number(p[0]), Number(p[1])])
     shapePolygon.push(shapePolygon[0]!)
   }
   // Rect/circle drag preview
@@ -430,111 +438,9 @@ watchEffect(() => {
     }
   }
 
-  const shapeDataPlain = shapePolygon ? [{ polygon: shapePolygon.map((p) => [p[0], p[1]]) }] : []
-  const polygonLayer = new PolygonLayer<{ polygon: [number, number][] }>({
-    id: 'shape',
-    data: shapeDataPlain,
-    pickable: false,
-    filled: true,
-    stroked: true,
-    getPolygon: (d) => d.polygon,
-    getFillColor: [120, 170, 255, 40],
-    getLineColor: [120, 170, 255, 180],
-    lineWidthMinPixels: 2,
-  })
-
-  const layers: any[] = [polygonLayer]
-
-  // Polygon drawing: show outline while adding points
-  if (shapeType.value === 'polygon' && drawingShape.value && shapePts.length >= 2) {
-    const pathDataPlain = shapePts.map((p) => [p[0], p[1]])
-    layers.push(
-      new PathLayer<{ path: [number, number][] }>({
-        id: 'shape-outline',
-        data: [{ path: pathDataPlain }],
-        getPath: (d) => d.path,
-        getColor: [120, 170, 255, 200],
-        widthUnits: 'pixels',
-        getWidth: 2,
-        widthMinPixels: 2,
-        capRounded: true,
-        jointRounded: true,
-      })
-    )
-  }
-
-  overlay.value.setProps({
-    layers: [
-      ...layers,
-      new ScatterplotLayer<{ longitude: number; latitude: number }>({
-        id: 'origin',
-        data: originData,
-        pickable: false,
-        stroked: true,
-        filled: true,
-        getPosition: (d) => [d.longitude, d.latitude],
-        getFillColor: [255, 255, 255, 200],
-        getLineColor: [120, 170, 255, 220],
-        getRadius: 60000,
-        radiusUnits: 'meters',
-        radiusMinPixels: 4,
-        radiusMaxPixels: 10,
-      }),
-      new ScatterplotLayer<EarthquakePoint>({
-        id: `earthquakes-${colorField}-${colorPaletteId}`,
-        data,
-        pickable: true,
-        autoHighlight: true,
-        highlightColor: [255, 255, 255, 180],
-        stroked: false,
-        filled: true,
-        opacity: 0.85,
-        getPosition: (d) => [d.longitude, d.latitude],
-        getFillColor: (d) =>
-          getPointColor(d, colorField, limits.value, colorPaletteId),
-        getRadius: (d) => magnitudeRadiusMeters(d.magnitude),
-        radiusUnits: 'meters',
-        radiusMinPixels: 2,
-        radiusMaxPixels: 30,
-      }),
-    ],
-  })
-})
-
-// Ensure map colors update when only palette/field change (explicit dependency)
-watch(
-  [colorByField, colorPalette],
-  () => {
-    if (!overlay.value) return
-    const colorField = colorByField.value
-    const colorPaletteId = colorPalette.value
-    const rawPoints = toRaw(filteredPoints.value)
-    const data = Array.isArray(rawPoints) ? rawPoints.map((d) => ({ ...d })) : []
-    const origin = distanceOrigin.value
-    const originData = origin ? [{ longitude: origin.longitude, latitude: origin.latitude }] : []
-    const shapePts = shapePoints.value
-    const dStart = dragStart.value
-    const dCurrent = dragCurrent.value
-    let shapePolygon: [number, number][] | null = null
-    if (shapeType.value === 'rectangle' && shapePts.length >= 4) {
-      shapePolygon = shapePts.map((p) => [p[0], p[1]])
-      shapePolygon.push(shapePolygon[0]!)
-    } else if (shapeType.value === 'rectangle' && shapePts.length >= 2) {
-      shapePolygon = buildRectanglePolygon(shapePts[0]!, shapePts[1]!)
-    } else if (shapeType.value === 'circle' && shapePts.length >= 2) {
-      shapePolygon = buildCirclePolygon(shapePts[0]!, shapePts[1]!)
-    } else if (shapeType.value === 'polygon' && shapePts.length >= 3) {
-      shapePolygon = shapePts.map((p) => [p[0], p[1]])
-      shapePolygon.push(shapePolygon[0]!)
-    }
-    if (!shapePolygon && dStart && dCurrent && (shapeType.value === 'rectangle' || shapeType.value === 'circle')) {
-      shapePolygon =
-        shapeType.value === 'rectangle'
-          ? buildRectanglePolygon(dStart, dCurrent)
-          : buildCirclePolygon(dStart, dCurrent)
-    }
-    const shapeDataPlain = shapePolygon ? [{ polygon: shapePolygon.map((p) => [p[0], p[1]]) }] : []
-    const polygonLayer = new PolygonLayer<{ polygon: [number, number][] }>({
+  const shapeDataPlain = shapePolygon ? (JSON.parse(JSON.stringify([{ polygon: shapePolygon }])) as { polygon: [number, number][] }[]) : []
+  const polygonLayer = markRaw(
+    new PolygonLayer<{ polygon: [number, number][] }>({
       id: 'shape',
       data: shapeDataPlain,
       pickable: false,
@@ -545,13 +451,18 @@ watch(
       getLineColor: [120, 170, 255, 180],
       lineWidthMinPixels: 2,
     })
-    const layers: any[] = [polygonLayer]
-    if (shapeType.value === 'polygon' && drawingShape.value && shapePts.length >= 2) {
-      const pathDataPlain = shapePts.map((p) => [p[0], p[1]])
-      layers.push(
+  )
+
+  const layers: any[] = [polygonLayer]
+
+  // Polygon drawing: show outline while adding points
+  if (shapeType.value === 'polygon' && drawingShape.value && shapePts.length >= 2) {
+    const pathDataPlain = JSON.parse(JSON.stringify(shapePts.map((p) => [Number(p[0]), Number(p[1])]))) as [number, number][]
+    layers.push(
+      markRaw(
         new PathLayer<{ path: [number, number][] }>({
           id: 'shape-outline',
-          data: [{ path: pathDataPlain }],
+          data: JSON.parse(JSON.stringify([{ path: pathDataPlain }])) as { path: [number, number][] }[],
           getPath: (d) => d.path,
           getColor: [120, 170, 255, 200],
           widthUnits: 'pixels',
@@ -561,10 +472,13 @@ watch(
           jointRounded: true,
         })
       )
-    }
-    overlay.value.setProps({
-      layers: [
-        ...layers,
+    )
+  }
+
+  overlay.value.setProps({
+    layers: [
+      ...layers,
+      markRaw(
         new ScatterplotLayer<{ longitude: number; latitude: number }>({
           id: 'origin',
           data: originData,
@@ -578,7 +492,9 @@ watch(
           radiusUnits: 'meters',
           radiusMinPixels: 4,
           radiusMaxPixels: 10,
-        }),
+        })
+      ),
+      markRaw(
         new ScatterplotLayer<EarthquakePoint>({
           id: `earthquakes-${colorField}-${colorPaletteId}`,
           data,
@@ -589,12 +505,121 @@ watch(
           filled: true,
           opacity: 0.85,
           getPosition: (d) => [d.longitude, d.latitude],
-          getFillColor: (d) => getPointColor(d, colorField, limits.value, colorPaletteId),
+          getFillColor: (d) =>
+            getPointColor(d, colorField, limits.value, colorPaletteId),
           getRadius: (d) => magnitudeRadiusMeters(d.magnitude),
           radiusUnits: 'meters',
           radiusMinPixels: 2,
           radiusMaxPixels: 30,
-        }),
+        })
+      ),
+    ],
+  })
+})
+
+// Ensure map colors update when only palette/field change (explicit dependency)
+watch(
+  [colorByField, colorPalette],
+  () => {
+    if (!overlay.value) return
+    const colorField = colorByField.value
+    const colorPaletteId = colorPalette.value
+    const data = plainCopyPoints(filteredPoints.value)
+    const origin = distanceOrigin.value
+    const originData = origin
+      ? (JSON.parse(JSON.stringify([{ longitude: Number(origin.longitude), latitude: Number(origin.latitude) }])) as { longitude: number; latitude: number }[])
+      : []
+    const shapePts = toRaw(shapePoints.value) ?? shapePoints.value
+    const dStart = dragStart.value
+    const dCurrent = dragCurrent.value
+    let shapePolygon: [number, number][] | null = null
+    if (shapeType.value === 'rectangle' && shapePts.length >= 4) {
+      shapePolygon = shapePts.map((p) => [Number(p[0]), Number(p[1])])
+      shapePolygon.push(shapePolygon[0]!)
+    } else if (shapeType.value === 'rectangle' && shapePts.length >= 2) {
+      shapePolygon = buildRectanglePolygon(shapePts[0]!, shapePts[1]!)
+    } else if (shapeType.value === 'circle' && shapePts.length >= 2) {
+      shapePolygon = buildCirclePolygon(shapePts[0]!, shapePts[1]!)
+    } else if (shapeType.value === 'polygon' && shapePts.length >= 3) {
+      shapePolygon = shapePts.map((p) => [Number(p[0]), Number(p[1])])
+      shapePolygon.push(shapePolygon[0]!)
+    }
+    if (!shapePolygon && dStart && dCurrent && (shapeType.value === 'rectangle' || shapeType.value === 'circle')) {
+      shapePolygon =
+        shapeType.value === 'rectangle'
+          ? buildRectanglePolygon(dStart, dCurrent)
+          : buildCirclePolygon(dStart, dCurrent)
+    }
+    const shapeDataPlain = shapePolygon ? (JSON.parse(JSON.stringify([{ polygon: shapePolygon }])) as { polygon: [number, number][] }[]) : []
+    const polygonLayer = markRaw(
+      new PolygonLayer<{ polygon: [number, number][] }>({
+        id: 'shape',
+        data: shapeDataPlain,
+        pickable: false,
+        filled: true,
+        stroked: true,
+        getPolygon: (d) => d.polygon,
+        getFillColor: [120, 170, 255, 40],
+        getLineColor: [120, 170, 255, 180],
+        lineWidthMinPixels: 2,
+      })
+    )
+    const layers: any[] = [polygonLayer]
+    if (shapeType.value === 'polygon' && drawingShape.value && shapePts.length >= 2) {
+      const pathDataPlain = JSON.parse(JSON.stringify(shapePts.map((p) => [Number(p[0]), Number(p[1])]))) as [number, number][]
+      layers.push(
+        markRaw(
+          new PathLayer<{ path: [number, number][] }>({
+            id: 'shape-outline',
+            data: JSON.parse(JSON.stringify([{ path: pathDataPlain }])) as { path: [number, number][] }[],
+            getPath: (d) => d.path,
+            getColor: [120, 170, 255, 200],
+            widthUnits: 'pixels',
+            getWidth: 2,
+            widthMinPixels: 2,
+            capRounded: true,
+            jointRounded: true,
+          })
+        )
+      )
+    }
+    overlay.value.setProps({
+      layers: [
+        ...layers,
+        markRaw(
+          new ScatterplotLayer<{ longitude: number; latitude: number }>({
+            id: 'origin',
+            data: originData,
+            pickable: false,
+            stroked: true,
+            filled: true,
+            getPosition: (d) => [d.longitude, d.latitude],
+            getFillColor: [255, 255, 255, 200],
+            getLineColor: [120, 170, 255, 220],
+            getRadius: 60000,
+            radiusUnits: 'meters',
+            radiusMinPixels: 4,
+            radiusMaxPixels: 10,
+          })
+        ),
+        markRaw(
+          new ScatterplotLayer<EarthquakePoint>({
+            id: `earthquakes-${colorField}-${colorPaletteId}`,
+            data,
+            pickable: true,
+            autoHighlight: true,
+            highlightColor: [255, 255, 255, 180],
+            stroked: false,
+            filled: true,
+            opacity: 0.85,
+            getPosition: (d) => [d.longitude, d.latitude],
+            getFillColor: (d) => getPointColor(d, colorField, limits.value, colorPaletteId),
+            getRadius: (d) => magnitudeRadiusMeters(d.magnitude),
+            radiusUnits: 'meters',
+            radiusMinPixels: 2,
+            radiusMaxPixels: 30,
+          })
+        ),
       ],
     })
   },
